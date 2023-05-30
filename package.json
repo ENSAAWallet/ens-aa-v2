@@ -1,0 +1,24 @@
+{
+  "name": "ens-aa-v2",
+  "version": "1.0.0",
+  "repository": "git@github.com:ENSAAWallet/ens-aa.git",
+  "author": "doublespending",
+  "license": "GPL-3.0",
+  "scripts": {
+    "setup": "yarn install --frozen-lockfile",
+    "format": "prettier --write .",
+    "check-pretty": "prettier --check .",
+    "lint": "solhint \"src/**/*.sol\"",
+    "compile": "forge compile --force",
+    "clean": "forge clean",
+    "test-local": "forge test -vvv --no-match-path 'test/forkMainnet/*.t.sol'",
+    "test-fork": "forge test -vvv --fork-url $MAINNET_NODE_RPC_URL --fork-block-number 17067009 --match-path 'test/forkMainnet/*.t.sol'"
+  },
+  "devDependencies": {
+    "prettier": "^2.8.8",
+    "prettier-plugin-solidity": "^1.1.3",
+    "solhint": "^3.4.1",
+    "solhint-plugin-prettier": "^0.0.5"
+  },
+  "dependencies": {}
+}
