@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.17;
 
+import {SignatureChecker} from "@openzeppelin/contracts/utils/cryptography/SignatureChecker.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {IEntryPoint} from "@account-abstraction/contracts/interfaces/IEntryPoint.sol";
 import {UserOperation, UserOperationLib} from "@account-abstraction/contracts/interfaces/UserOperation.sol";
@@ -148,18 +149,12 @@ contract TBAccount is Account {
         UserOperation calldata userOp,
         bytes32 userOpHash
     ) internal virtual override returns (uint256 validationData) {
-        bytes32 hash = userOpHash.toEthSignedMessageHash();
-        if (cacheOwner.code.length > 0) {
-            return
-                IERC1271(cacheOwner).isValidSignature(hash, userOp.signature) ==
-                    IERC1271.isValidSignature.selector
-                    ? SIG_VALIDATION_SUCCEEDED
-                    : SIG_VALIDATION_FAILED;
-        }
         return
-            cacheOwner == hash.recover(userOp.signature)
-                ? SIG_VALIDATION_SUCCEEDED
-                : SIG_VALIDATION_FAILED;
+            SignatureChecker.isValidSignatureNow(
+                cacheOwner,
+                userOpHash.toEthSignedMessageHash(),
+                userOp.signature
+            );
     }
 
     function _compensate(
