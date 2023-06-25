@@ -5,110 +5,97 @@ import {SignatureChecker} from "@openzeppelin/contracts/utils/cryptography/Signa
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {IEntryPoint} from "@account-abstraction/contracts/interfaces/IEntryPoint.sol";
 import {UserOperation, UserOperationLib} from "@account-abstraction/contracts/interfaces/UserOperation.sol";
-import {IERC1271} from "@openzeppelin/contracts/interfaces/IERC1271.sol";
 import {Account} from "./abstracts/Account.sol";
 
-contract TBAccount is Account {
+import {ITBAccount} from "./interfaces/ITBAccount.sol";
+
+contract TBAccount is ITBAccount, Account {
     using ECDSA for bytes32;
     using UserOperationLib for UserOperation;
-
-    // `immutable` to prevent attacker changing those configurations.
-
-    // prevent invoking `updateOwnerAndCompensate` with unreasonable priorityFeePerGas
-    // e.g. 4 gwei
-    uint256 public immutable maxPriorityFeePerGasForSync;
-    // prevent invoking `updateOwnerAndCompensate` with unreasonable maxFeePerGas
-    // e.g. 80 gwei
-    uint256 public immutable maxFeePerGasForSync;
-    // prevent invoking `updateOwnerAndCompensate` with unreasonable maxPreVerficationGas through ERC-4337 workflow
-    // e.g. 50000 * 1.2
-    uint256 public immutable maxPreVerficationGasForSync;
-    // estimate the gas usage of `updateOwnerAndCompensate` (should > real gas usage)
+    // estimate the gas usage of `syncOwner` (should > real gas usage)
     // e.g. 35000
     uint256 public immutable syncGasCost;
-    // reward recipent if it help update cacheOwner to currentOwner in `updateOwnerAndCompensate`
+    // estimate the gas usage of `refund` (should > real gas usage)
+    // e.g. 1000 + 2300
+    uint256 public immutable refundGasCost;
+    // reward recipent if it help update cacheOwner to currentOwner in `syncOwnerAndRefund`
     // e.g. 0.0005 ether
-    uint256 public immutable syncReward;
+    uint256 public immutable syncRefund;
+    // prefund to call `syncOwner` through entryPoint
+    // e.g. 0.0010 ether
+    uint256 public immutable syncPrefund;
 
     IEntryPoint private immutable _entryPoint;
-    address public cacheOwner;
-
-    event SyncOwner(address indexed newOwner, address indexed cacheOwner);
-    event SyncRefund(
-        address indexed recipient,
-        bool indexed success,
-        uint256 amount
-    );
-    event SkipExecution();
-
-    modifier onlyEntryPointOrOwner() override {
-        (bool isUpdated, address currentOwner, ) = updateOwnerAndCompensate(
-            payable(cacheOwner)
-        );
-
-        if (
-            msg.sender == currentOwner ||
-            (msg.sender == address(entryPoint()) && !isUpdated)
-        ) {
-            // method is invoked by the current owner
-            _;
-        } else {
-            emit SkipExecution();
-        }
-    }
 
     constructor(
         IEntryPoint anEntryPoint,
-        uint256 _maxPriorityFeePerGasForSync,
-        uint256 _maxFeePerGasForSync,
-        uint256 _maxPreVerficationGasForSync,
         uint256 _syncGasCost,
-        uint256 _syncReward
+        uint256 _refundGasCost,
+        uint256 _syncRefund,
+        uint256 _syncPrefund
     ) {
         _entryPoint = anEntryPoint;
-        maxPriorityFeePerGasForSync = _maxPriorityFeePerGasForSync;
-        maxFeePerGasForSync = _maxFeePerGasForSync;
-        maxPreVerficationGasForSync = _maxPreVerficationGasForSync;
         syncGasCost = _syncGasCost;
-        syncReward = _syncReward;
+        refundGasCost = _refundGasCost;
+        syncRefund = _syncRefund;
+        syncPrefund = _syncPrefund;
     }
 
-    function execute(
-        address dest,
+    function executeCall(
+        address to,
         uint256 value,
-        bytes calldata func
-    ) external onlyEntryPointOrOwner {
-        _call(dest, value, func);
+        bytes calldata data
+    ) external payable onlyEntryPointOrOwner returns (bytes memory result) {
+        result = _call(to, value, data);
     }
 
     function executeBatch(
-        address[] calldata dest,
+        address[] calldata to,
         uint256[] calldata value,
         bytes[] calldata data
-    ) external onlyEntryPointOrOwner {
-        _callBatch(dest, value, data);
+    ) external payable onlyEntryPointOrOwner {
+        _callBatch(to, value, data);
     }
 
-    function updateOwnerAndCompensate(
-        address payable recipient
-    ) public returns (bool isUpdated, address currentOwner, uint256 refund) {
-        (isUpdated, currentOwner) = updateOwner();
-        if (isUpdated && recipient != address(0)) {
-            refund = _compensate(recipient);
-        }
+    // must call `pause` before list the nft
+    // anyone can call `syncOwner` to unpause
+    function pause() public onlyEntryPointOrOwner {
+        _pause();
     }
 
-    function updateOwner()
-        public
-        returns (bool isUpdated, address currentOwner)
-    {
+    function syncOwner() public returns (bool isUpdated, address currentOwner) {
         currentOwner = owner();
-        _cacheOwner = cacheOwner;
+        address _cacheOwner = cacheOwner;
         if (_cacheOwner != currentOwner) {
             cacheOwner = _cacheOwner;
             isUpdated = true;
+            emit OwnerUpdated(currentOwner, cacheOwner);
         }
-        emit SyncOwner(currentOwner, cacheOwner);
+
+        // only unpase when owner equals to cacheOwner
+        if (paused()) {
+            _unpause();
+        }
+    }
+
+    function syncOwnerAndRefund(
+        address payable recipient
+    ) public returns (address currentOwner, uint256 profit) {
+        // if profit < 0, tx will revert
+        profit = syncRefund - tx.gasprice * (syncGasCost + refundGasCost);
+
+        (bool isUpdated, address _currentOwner) = syncOwner();
+        require(isUpdated, "owner should be updated");
+
+        if (recipient == address(0)) {
+            recipient = payable(msg.sender);
+        }
+
+        // 2300 gas
+        recipient.transfer(syncRefund);
+        emit Refund(recipient, profit);
+
+        currentOwner = _currentOwner;
     }
 
     function entryPoint() public view virtual override returns (IEntryPoint) {
@@ -119,29 +106,27 @@ contract TBAccount is Account {
         UserOperation calldata userOp,
         bytes32 userOpHash,
         uint256 missingAccountFunds
-    ) external virtual override returns (uint256 validationData) {
+    ) external virtual override whenNotPaused returns (uint256 validationData) {
         _requireFromEntryPoint();
 
-        require(
-            userOp.maxFeePerGas < maxFeePerGasForSync,
-            "maxFeePerGas too high (should <= `maxFeePerGasForSync`)"
-        );
-        require(
-            userOp.maxPriorityFeePerGas < maxPriorityFeePerGasForSync,
-            "maxPriorityFeePerGas too high (should <= `maxPriorityFeePerGasForSync`)"
-        );
-        require(
-            userOp.callGasLimit > syncGasCost,
-            "callGasLimit too low (should > `syncGasCost`)"
-        );
-        require(
-            userOp.preVerificationGas < maxPreVerficationGasForSync,
-            "preVerificationGas too high (should > `maxPreVerficationGasForSync`)"
-        );
-        validationData = userOp.nonce == 0
-            ? SIG_VALIDATION_SUCCEEDED
-            : _validateSignature(userOp, userOpHash);
-        _validateNonce(userOp.nonce);
+        if (userOp.nonce == 0 || paused()) {
+            require(
+                keccak256(userOp.callData) ==
+                    keccak256(abi.encodeCall(this.syncOwner, ())),
+                "only allow to syncOwner when init or unpause"
+            );
+            require(
+                userOp.callGasLimit >= syncGasCost,
+                "not enought callCasLimit to syncOwner"
+            );
+            require(
+                _getRequiredPrefund(userOp) <= syncPrefund,
+                "too much required prefund when init"
+            );
+        }
+
+        validationData = _validateSignature(userOp, userOpHash);
+
         _payPrefund(missingAccountFunds);
     }
 
@@ -150,46 +135,29 @@ contract TBAccount is Account {
         bytes32 userOpHash
     ) internal virtual override returns (uint256 validationData) {
         return
-            SignatureChecker.isValidSignatureNow(
-                cacheOwner,
-                userOpHash.toEthSignedMessageHash(),
-                userOp.signature
-            );
+            validationData = userOp.nonce == 0 ||
+                SignatureChecker.isValidSignatureNow(
+                    cacheOwner,
+                    userOpHash.toEthSignedMessageHash(),
+                    userOp.signature
+                )
+                ? SIG_VALIDATION_SUCCEEDED
+                : SIG_VALIDATION_FAILED;
     }
 
-    function _compensate(
-        address payable recipient
-    ) internal returns (uint256 refund) {
-        uint256 maxRefund = syncReward;
-        // if msg.sender is entryPoint, the gas fee is paied by TBAccount itself.
-        if (msg.sender != address(entryPoint())) {
-            uint256 gasPrice = _min(
-                block.basefee + maxPriorityFeePerGasForSync,
-                tx.gasprice,
-                maxFeePerGasForSync
-            );
+    function _getRequiredPrefund(
+        UserOperation calldata userOp
+    ) internal pure returns (uint256 requiredPrefund) {
+        unchecked {
+            //when using a Paymaster, the verificationGasLimit is used also to as a limit for the postOp call.
+            // our security model might call postOp eventually twice
+            uint256 mul = userOp.paymasterAndData.length != 0 ? 3 : 1;
+            uint256 requiredGas = userOp.callGasLimit +
+                userOp.verificationGasLimit *
+                mul +
+                userOp.preVerificationGas;
 
-            maxRefund += syncGasCost * gasPrice;
+            requiredPrefund = requiredGas * userOp.maxFeePerGas;
         }
-        refund = _min(address(this).balance, maxRefund);
-        if (refund != 0) {
-            (bool success, ) = recipient.call{value: refund}("");
-            if (!success) {
-                refund = 0;
-            }
-        }
-        emit SyncRefund(recipient, refund == 0, refund);
-    }
-
-    function _min(uint256 a, uint256 b) internal pure returns (uint256) {
-        return a > b ? b : a;
-    }
-
-    function _min(
-        uint256 a,
-        uint256 b,
-        uint256 c
-    ) internal pure returns (uint256) {
-        return _min(_min(a, b), c);
     }
 }
