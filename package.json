@@ -11,8 +11,7 @@
     "lint": "solhint \"src/**/*.sol\"",
     "compile": "forge compile --force",
     "clean": "forge clean",
-    "test-local": "forge test -vvv --no-match-path 'test/forkMainnet/*.t.sol'",
-    "test-fork": "forge test -vvv --fork-url $MAINNET_NODE_RPC_URL --fork-block-number 17067009 --match-path 'test/forkMainnet/*.t.sol'"
+    "test": "forge test -vvv"
   },
   "devDependencies": {
     "prettier": "^2.8.8",
